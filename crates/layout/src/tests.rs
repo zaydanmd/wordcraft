@@ -941,6 +941,92 @@ fn right_tab_aligns_text_end() {
     assert!((end - 472.0).abs() < 1.0, "{end}");
 }
 
+fn decimal_tab_doc(text: &str, stop: f32) -> Document {
+    let mut d = Document::from_text(text);
+    d.format_paragraphs(&Pos::body(0, 0), &Pos::body(0, 0), &|p| {
+        p.tabs = Some(vec![wordcraft_doc::props::TabStop { pos: stop, align: wordcraft_doc::props::TabAlign::Decimal, leader: Default::default() }])
+    })
+    .unwrap();
+    d
+}
+
+#[test]
+fn decimal_tab_aligns_separator() {
+    for text in ["Item\t12.34", "Item\t12.34.56"] {
+        let d = decimal_tab_doc(text, 400.0);
+        let dot = lay(&d).caret(&Pos::body(0, 7)).unwrap().x;
+        assert!((dot - 472.0).abs() < 0.5, "{text}: first decimal separator at {dot}, expected 472");
+    }
+}
+
+#[test]
+fn decimal_tab_without_separator_aligns_text_end() {
+    let text = "Item\t1234";
+    let d = decimal_tab_doc(text, 400.0);
+    let end = lay(&d).caret(&Pos::body(0, text.len())).unwrap().x;
+    assert!((end - 472.0).abs() < 0.5, "number ends at {end}, expected 472");
+}
+
+#[test]
+fn decimal_tab_fraction_wraps_at_right_margin() {
+    let text = format!("Item\t12.{}", "3".repeat(30));
+    let d = decimal_tab_doc(&text, 450.0);
+    let l = lay(&d);
+    let label = l.caret(&Pos::body(0, 0)).unwrap();
+    let end = l.caret(&Pos::body(0, text.len())).unwrap();
+    assert!(end.top > label.top, "fraction did not wrap: {label:?}, {end:?}");
+    for off in 0..=text.len() {
+        let c = l.caret(&Pos::body(0, off)).unwrap();
+        assert!(c.x.is_finite() && (72.0..=540.01).contains(&c.x), "offset {off}: {c:?}");
+    }
+}
+
+#[test]
+fn decimal_tab_resolves_before_next_tab_without_overlap() {
+    let text = "Item\t12.34567890\tNext";
+    let mut d = decimal_tab_doc(text, 200.0);
+    d.format_paragraphs(&Pos::body(0, 0), &Pos::body(0, 0), &|p| {
+        p.tabs.as_mut().unwrap().push(wordcraft_doc::props::TabStop { pos: 220.0, align: Default::default(), leader: Default::default() });
+    })
+    .unwrap();
+    let l = lay(&d);
+    let dot = l.caret(&Pos::body(0, 7)).unwrap();
+    let number_end = l.caret(&Pos::body(0, 16)).unwrap();
+    let next = l.caret(&Pos::body(0, 17)).unwrap();
+    assert!((dot.x - 272.0).abs() < 0.5, "decimal separator at {}", dot.x);
+    assert!(next.top > number_end.top || next.x >= number_end.x, "overlap: {number_end:?}, {next:?}");
+}
+
+#[test]
+fn decimal_tab_aligns_separator_in_table_cell() {
+    let mut d = decimal_tab_doc("Item\t12.34", 200.0);
+    let mut t = Table::new(1, 1, 400.0);
+    t.props.fixed = true;
+    t.props.cell_margins = Some([0.0; 4]);
+    t.rows[0].cells[0].blocks = d.body.clone();
+    d.body = vec![std::sync::Arc::new(Block::Table(t))];
+    let l = lay(&d);
+    let pos = |off| Pos { story: StoryRef::Body, path: Path(vec![0, 0, 0, 0]), off };
+    let start = l.caret(&pos(0)).unwrap().x;
+    let dot = l.caret(&pos(7)).unwrap().x;
+    assert!((dot - start - 200.0).abs() < 0.5, "cell start {start}, decimal separator {dot}");
+}
+
+#[test]
+fn decimal_tab_separator_follows_run_language() {
+    for (text, lang, off) in [
+        ("Item\t1,234.56", Some("en-US"), 10),
+        ("Item\t12,34", Some("id-ID"), 7),
+        ("Item\t1,234.56", Some("zz-ZZ"), 10),
+        ("Item\t1,234.56", None, 10),
+    ] {
+        let mut d = decimal_tab_doc(text, 400.0);
+        d.format_range(&Pos::body(0, 0), &Pos::body(0, text.len()), &|c| c.lang = lang.map(Into::into)).unwrap();
+        let dot = lay(&d).caret(&Pos::body(0, off)).unwrap().x;
+        assert!((dot - 472.0).abs() < 0.5, "{lang:?}: separator at {dot}, expected 472");
+    }
+}
+
 /// A paragraph `before` + positional tab + `after`, with left and right indents and a custom
 /// left tab stop at 50 pt that the positional tab must ignore.
 fn ptab_doc(before: &str, after: &str, ptab: InlineObject, indents: (f32, f32)) -> Document {
