@@ -342,8 +342,14 @@ fn is_hebrew(f: &str) -> bool {
 /// The first installed substitute for a missing `family`. For a Thai font, the first with Latin
 /// letters and digits as well as Thai ones (a Thai face without Latin would leave a mixed run in
 /// two fonts, #1549), else the first with Thai letters, else the first installed.
-fn substitute(db: &FontDb, family: &str) -> Option<&'static str> {
-    let mut installed = substitutes(family).iter().copied().filter(|s| db.has_family(s));
+fn substitute(db: &FontDb, family: &str, required: Option<(char, &str)>) -> Option<&'static str> {
+    let mut installed = substitutes(family).iter().copied().filter(|s| {
+        db.has_family(s)
+            && required.is_none_or(|(c, style)| {
+                let face = db.face(s, style);
+                face.named(s) && face.covers(c)
+            })
+    });
     if !is_thai_family(family) {
         return installed.next();
     }
@@ -367,6 +373,16 @@ fn style_name(bold: bool, italic: bool) -> &'static str {
         (false, true) => "Italic",
         (true, true) => "Bold Italic",
     }
+}
+
+/// The first installed substitute that draws a missing symbol font's Unicode character.
+/// Kept outside the family resolve cache: different characters can need different faces.
+pub fn symbol_fallback(family: &str, c: char, bold: bool, italic: bool) -> Option<FaceRef> {
+    let db = FontDb::global();
+    let family = if family.trim().eq_ignore_ascii_case("Symbol (PCL6)") { "Symbol" } else { family };
+    let style = style_name(bold, italic);
+    let name = substitute(db, family, Some((c, style)))?;
+    Some(FaceRef::of(&db.face(name, style)))
 }
 
 type Memo = (u64, HashMap<(String, bool, bool), Resolved>);
@@ -405,7 +421,7 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
         // Windows maps the charset names to the font itself: not a substitution.
         (base.to_string(), false)
     } else {
-        (substitute(db, base).unwrap_or(crate::FALLBACK_FAMILY).to_string(), true)
+        (substitute(db, base, None).unwrap_or(crate::FALLBACK_FAMILY).to_string(), true)
     };
     let face = db.face(&fam, style_name(bold, italic));
     let r = Resolved { synth_bold: bold && face.weight < 600.0, synth_italic: italic && !face.italic, substituted, face: FaceRef::of(&face) };
@@ -559,6 +575,44 @@ mod tests {
         for f in ["Symbol", "Wingdings", "Wingdings 2", "Wingdings 3", "Webdings"] {
             assert!(substitutes(f).contains(&"Noto Sans Symbols 2"), "{f}");
         }
+    }
+
+    fn symbol_test_db() -> FontDb {
+        // Synthetic subsets of our bundled font: the first symbol face has only A, the next
+        // has U+2022 as well. No system or optional craft-fonts family is needed.
+        let mut data = crate::bundled()[0].to_vec();
+        let entry = data[12..].as_chunks::<16>().0.iter().position(|r| &r[..4] == b"cmap").unwrap() * 16 + 12;
+        let offset = data.len() as u32;
+        let cmap: Vec<u8> = [0u16, 1, 3, 10].into_iter().flat_map(u16::to_be_bytes).chain(12u32.to_be_bytes()).collect();
+        data.extend(cmap);
+        data.extend([12u16, 0].into_iter().flat_map(u16::to_be_bytes));
+        data.extend([28u32, 0, 1, 65, 65, 1].into_iter().flat_map(u32::to_be_bytes));
+        data[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+        data[entry + 12..entry + 16].copy_from_slice(&40u32.to_be_bytes());
+        let db = FontDb::with_font_dirs(Vec::new());
+        db.set_system_fallback(false);
+        assert_eq!(db.add_document_fonts(vec![(data, "Apple Symbols".into()), (crate::bundled()[0].to_vec(), "Segoe UI Symbol".into())]), 2);
+        db
+    }
+
+    #[test]
+    fn symbol_substitute_skips_an_installed_face_without_the_bullet() {
+        let db = symbol_test_db();
+        assert!(db.face("Apple Symbols", "Regular").covers('A'));
+        assert!(!db.face("Apple Symbols", "Regular").covers('\u{2022}'));
+        assert!(db.face("Segoe UI Symbol", "Regular").covers('\u{2022}'));
+        assert_eq!(substitute(&db, "Symbol", Some(('\u{2022}', "Regular"))), Some("Segoe UI Symbol"));
+    }
+
+    #[test]
+    fn symbol_substitute_checks_each_character_and_leaves_uncovered_glyphs_to_fallback() {
+        let db = symbol_test_db();
+        for c in ['A', '\u{2022}', 'A'] {
+            let expected = if c == 'A' { "Apple Symbols" } else { "Segoe UI Symbol" };
+            assert_eq!(substitute(&db, "Symbol", Some((c, "Regular"))), Some(expected));
+        }
+        assert_eq!(substitute(&db, "Symbol", Some(('\u{F0001}', "Regular"))), None);
+        assert_eq!(substitute(&db, "Symbol", None), Some("Apple Symbols"));
     }
 
     #[test]
