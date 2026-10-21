@@ -2151,6 +2151,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                 end = LineEnd::Wrap;
                 break;
             }
+            // Text after a right/centre tab grows leftwards into the tab's space first (after a
+            // decimal tab, only until the separator).
             let absorbs = pending_tab.is_some_and(|(tj, stop, _)| {
                 let room = pl.clusters.get(tj).map(|t| t.adv).unwrap_or(0.0);
                 match stop.align {
