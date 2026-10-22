@@ -1566,6 +1566,7 @@ fn border_room(b: Option<Border>) -> f32 {
     b.map(para_border).filter(Border::is_visible).map_or(0.0, |b| b.space + b.width)
 }
 
+/// Clamp a paragraph border's dimensions to finite values within the DOCX bounds.
 fn para_border(mut b: Border) -> Border {
     b.space = if b.space.is_finite() { b.space.clamp(0.0, 31.0) } else { 0.0 };
     b.width = if b.width.is_finite() { b.width.clamp(0.0, 12.0) } else { 0.0 };
@@ -3504,8 +3505,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // drops its space before), they are placed again there.
     let rp = ctx.doc.styles.resolve_para(&p.props);
     let space_before = rp.space_before;
-    let above = rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
-    let top_room = border_room(rp.borders.and_then(|b| if above { b.between } else { b.top }));
+    let mut above = rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
+    let mut top_room = border_room(rp.borders.and_then(|b| if above { b.between } else { b.top }));
     let excl_mark = pb.excl.len();
     let guess = pb.y + space_before;
     let label = ctx.next_label(p);
@@ -3516,6 +3517,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // Where its automatic equation numbers start: each layout of it again counts from here.
     let eq_start = ctx.eq_count;
     let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, guess, space_before, top_room, excl_mark, &label);
+    (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
     // page (bounded: a paragraph over hundreds of pages keeps the last number it got).
     let (mut laid_page, mut laid_width) = (pb.number, pb.col_w());
@@ -3607,6 +3609,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     if spot(pb) != placed_at || ((pb.y - guess).abs() > 0.01 && !pb.excl.is_empty()) {
         let y0 = pb.y;
         (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, y0, applied_before, top_room, excl_mark, &label));
+        (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
     }
@@ -3637,6 +3640,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     && relaid.lines.get(k).is_some_and(|l| (l.top - t).abs() < 0.01)
                 {
                     (pl, rel) = (relaid, here);
+                    (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
                     n = pl.lines.len();
                     l0 = k;
                 }
@@ -3662,6 +3666,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             match relaid.lines.iter().position(|l| l.start == resume) {
                 Some(k) => {
                     pl = relaid;
+                    (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
                     n = pl.lines.len();
                     l0 = k;
                 }
@@ -3782,6 +3787,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 if l0 == 0 {
                     let y0 = pb.y;
                     (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, y0, 0.0, top_room, excl_mark, &label));
+                    (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
                     (laid_page, laid_width) = (pb.number, pb.col_w());
                     anchor_y = y0;
                     n = pl.lines.len();
@@ -3908,6 +3914,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
                         (float_rects, pl, rel) = (rects, relaid, relaid_rel);
+                        (above, top_room) = pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
                         (laid_page, laid_width) = (pb.number, pb.col_w());
                         anchor_y = y0;
                         n = pl.lines.len();

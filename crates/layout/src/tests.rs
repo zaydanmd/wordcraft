@@ -8568,6 +8568,21 @@ fn a_paragraph_left_out_whole_takes_no_room() {
     assert!((three_top(&d, &plain, 2) - without).abs() < 0.01);
 }
 
+#[test]
+fn a_hidden_deleted_paragraphs_border_takes_no_room() {
+    let mut d = Document::from_text("One\nGone\nThree");
+    d.para_mut(StoryRef::Body, &Path::top(1)).unwrap().props.borders =
+        Some(Borders { top: Some(Border { space: 31.0, ..Border::single(12.0) }), ..Default::default() });
+    d.format_range(&Pos::body(1, 0), &Pos::body(2, 0), &|c| c.del = Some(0)).unwrap();
+    let opts = LayoutOptions { hide_deleted: true, ..Default::default() };
+    let l = layout(&d, &mut LayoutCache::new(), &opts);
+    let without = layout(&Document::from_text("One\nThree"), &mut LayoutCache::new(), &opts);
+    let next = l.caret(&Pos::body(2, 0)).unwrap();
+    let expected = without.caret(&Pos::body(1, 0)).unwrap();
+    assert_eq!(next.page, expected.page);
+    assert!((next.top - expected.top).abs() < 0.01, "next paragraph at {}, expected {}", next.top, expected.top);
+}
+
 /// Gap #5 review: a paragraph left out whole draws no shading and no borders (they would be
 /// lines across the page at its zero height).
 #[test]
