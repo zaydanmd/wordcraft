@@ -2311,6 +2311,46 @@ fn section_breaks_show_with_formatting_marks() {
 }
 
 #[test]
+fn paragraph_border_room_stays_finite_and_bounded() {
+    let plain = lay(&Document::from_text("Bordered\nFollowing\nLast"));
+    let ys = |l: &DocLayout| -> Vec<f32> {
+        l.pages.iter().flat_map(|p| &p.items).filter_map(|i| if let Placed::Lines { y, .. } = i { Some(*y) } else { None }).collect()
+    };
+    let baseline = ys(&plain);
+    for (space, width, room) in [
+        (f32::NAN, 2.0, 2.0),
+        (f32::INFINITY, 2.0, 2.0),
+        (f32::NEG_INFINITY, 2.0, 2.0),
+        (f32::MAX, 2.0, 33.0),
+        (-f32::MAX, 2.0, 2.0),
+        (-4.0, 2.0, 2.0),
+        (3.0, f32::MAX, 15.0),
+        (3.0, -4.0, 0.0),
+        (3.0, f32::NAN, 0.0),
+        (3.0, f32::INFINITY, 0.0),
+        (3.0, f32::NEG_INFINITY, 0.0),
+    ] {
+        let mut d = Document::from_text("Bordered\nFollowing\nLast");
+        let b = Some(Border { space, ..Border::single(width) });
+        d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().props.borders = Some(Borders { top: b, bottom: b, ..Default::default() });
+        let l = lay(&d);
+        let tops = ys(&l);
+        assert_eq!(l.pages.len(), 1);
+        assert_eq!(tops.len(), baseline.len());
+        for (i, (top, base)) in tops.iter().zip(&baseline).enumerate() {
+            let shift = if i == 0 { room } else { room * 2.0 };
+            assert!((top - base - shift).abs() < 0.01, "space={space}, width={width}: {tops:?} vs {baseline:?}");
+        }
+        for item in &l.pages[0].items {
+            if let Placed::Rule { x0, y0, x1, y1, border } = item {
+                assert!([*x0, *y0, *x1, *y1, border.space, border.width].iter().all(|v| v.is_finite()));
+                assert!((0.0..=31.0).contains(&border.space) && (0.0..=12.0).contains(&border.width));
+            }
+        }
+    }
+}
+
+#[test]
 fn a_bottom_border_leaves_room_before_the_next_paragraph() {
     let mut d = Document::from_text("Bordered\nFollowing");
     let plain = lay(&d);
@@ -2394,6 +2434,42 @@ fn a_split_paragraph_has_border_room_only_at_its_ends() {
             assert!((next.top - bottom - 7.0).abs() < 0.01);
         }
     }
+}
+
+#[test]
+fn joined_paragraphs_draw_their_between_border_above_the_text() {
+    let make = |between: Option<Border>| {
+        let mut d = Document::from_text("First\nSecond");
+        for i in 0..2 {
+            let p = d.para_mut(StoryRef::Body, &Path::top(i)).unwrap();
+            p.props.borders = Some(Borders { between, ..Borders::box_(Border { space: 3.0, ..Border::single(2.0) }) });
+            p.props.space_before = Some(0.0);
+            p.props.space_after = Some(0.0);
+        }
+        lay(&d)
+    };
+    let plain = make(None);
+    let l = make(Some(Border { space: 7.0, ..Border::single(1.0) }));
+    let first = l.caret(&Pos::body(0, 0)).unwrap();
+    let second = l.caret(&Pos::body(1, 0)).unwrap();
+    assert!((first.top - plain.caret(&Pos::body(0, 0)).unwrap().top).abs() < 0.01);
+    let shift = second.top - plain.caret(&Pos::body(1, 0)).unwrap().top;
+    assert!((shift - 8.0).abs() < 0.01, "between border moves the second paragraph by {shift} pt");
+    let rules: Vec<_> = l.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Placed::Rule { x0, y0, x1, y1, .. } if y0 == y1 && *y0 > first.top && *y0 < second.top => Some((*x0, *y0, *x1)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert!((rules[0].0 - l.pages[0].body.x + 3.0).abs() < 0.01);
+    assert!((rules[0].2 - l.pages[0].body.right() - 3.0).abs() < 0.01);
+    assert!((second.top - rules[0].1 - 7.5).abs() < 0.01);
+    let hidden = make(Some(Border { style: BorderStyle::None, space: 7.0, ..Border::single(1.0) }));
+    assert!((hidden.caret(&Pos::body(1, 0)).unwrap().top - plain.caret(&Pos::body(1, 0)).unwrap().top).abs() < 0.01);
+    assert_eq!(hidden.pages[0].items.iter().filter(|i| matches!(i, Placed::Rule { y0, y1, .. } if y0 == y1)).count(), 2);
 }
 
 /// A paragraph kept together counts its border room: one that fits on the page only without it
@@ -2501,6 +2577,7 @@ fn paragraphs_with_the_same_borders_join_in_one_shaded_box() {
     // One and Two are one box: no gap between their shading or their bars.
     assert!((fills[2].y - fills[1].bottom()).abs() < 0.01, "{fills:?}");
     assert!((bars[2].0 - bars[1].1).abs() < 0.01, "{bars:?}");
+    assert_eq!(items.iter().filter(|i| matches!(i, Placed::Rule { y0, y1, .. } if y0 == y1)).count(), 1);
 }
 
 #[test]

@@ -1298,10 +1298,12 @@ fn layout_box(
                 }
                 // Bordered paragraphs: room for their borders, those of a group joined in one box.
                 let cell = table.map(|t| &t.para);
-                let (above, below) = (joined(ctx.doc, blocks, i, i.checked_sub(1), cell), joined(ctx.doc, blocks, i, Some(i + 1), cell));
+                let above = pl.rp.borders.is_some() && joined(ctx.doc, blocks, i, i.checked_sub(1), cell);
+                let below = pl.rp.borders.is_some() && joined(ctx.doc, blocks, i, Some(i + 1), cell);
                 let mut edges = Edges::own(&pl, 0, pl.lines.len());
                 if above {
-                    edges.top = 0.0;
+                    edges.top = border_room(pl.rp.borders.and_then(|b| b.between));
+                    edges.between = true;
                 }
                 if below {
                     edges.bottom = 0.0;
@@ -1312,7 +1314,7 @@ fn layout_box(
                 }
                 let lead = pl.lines.first().map_or(0.0, |l| l.top.max(0.0)) + edges.top;
                 if above {
-                    edges.up = (y + lead - prev_end).max(0.0);
+                    edges.up = (y + lead - edges.top - prev_end).max(0.0);
                 }
                 prev_end = push_para(&mut items, story, &path, &pl, 0, pl.lines.len(), 0.0, y + lead, width, edges);
                 // Pictures, shapes and text boxes: drawn, their areas and text boxes' text.
@@ -1590,7 +1592,14 @@ fn joined(doc: &Document, blocks: &Blocks, i: usize, j: Option<usize>, table: Op
 /// The room a paragraph's top or bottom border takes in the text flow: its distance from the
 /// text plus its width (Word).
 fn border_room(b: Option<Border>) -> f32 {
-    b.filter(Border::is_visible).map_or(0.0, |b| b.space + b.width)
+    b.map(para_border).filter(Border::is_visible).map_or(0.0, |b| b.space + b.width)
+}
+
+/// Keep paragraph border dimensions finite and within the DOCX bounds.
+fn para_border(mut b: Border) -> Border {
+    b.space = if b.space.is_finite() { b.space.clamp(0.0, 31.0) } else { 0.0 };
+    b.width = if b.width.is_finite() { b.width.clamp(0.0, 12.0) } else { 0.0 };
+    b
 }
 
 /// How a piece of a paragraph meets the paragraphs around it: the room taken by its top and
@@ -1602,13 +1611,18 @@ struct Edges {
     top: f32,
     bottom: f32,
     up: f32,
+    between: bool,
 }
 
 impl Edges {
     /// A paragraph on its own: its top and bottom borders at its ends.
     fn own(pl: &ParaLayout, l0: usize, l1: usize) -> Edges {
         let b = pl.rp.borders.unwrap_or_default();
-        Edges { top: if l0 == 0 { border_room(b.top) } else { 0.0 }, bottom: if l1 >= pl.lines.len() { border_room(b.bottom) } else { 0.0 }, up: 0.0 }
+        Edges {
+            top: if l0 == 0 { border_room(b.top) } else { 0.0 },
+            bottom: if l1 >= pl.lines.len() { border_room(b.bottom) } else { 0.0 },
+            ..Default::default()
+        }
     }
 }
 
@@ -1646,11 +1660,11 @@ fn push_para(
         let sp = |o: &Option<Border>| o.map(|b| b.space).unwrap_or(0.0);
         let (lx, rx) = (left - sp(&b.left), right + sp(&b.right));
         // The top and bottom lines lie beyond their distance from the text.
-        if let Some(t) = b.top.filter(|t| e.top > 0.0 && t.is_visible()) {
+        if let Some(t) = (if e.between { b.between } else { b.top }).map(para_border).filter(|t| e.top > 0.0 && t.is_visible()) {
             let ty = y - t.space - t.width / 2.0;
             items.push(Placed::Rule { x0: lx, y0: ty, x1: rx, y1: ty, border: t });
         }
-        if let Some(t) = b.bottom.filter(|t| e.bottom > 0.0 && t.is_visible()) {
+        if let Some(t) = b.bottom.map(para_border).filter(|t| e.bottom > 0.0 && t.is_visible()) {
             let by = y + h + t.space + t.width / 2.0;
             items.push(Placed::Rule { x0: lx, y0: by, x1: rx, y1: by, border: t });
         }
@@ -3702,8 +3716,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // drops its space before), they are placed again there.
     let rp = ctx.doc.styles.resolve_para(&p.props);
     let space_before = rp.space_before;
-    let mut above = joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
-    let mut top_room = if above { 0.0 } else { border_room(rp.borders.and_then(|b| b.top)) };
+    let mut above = rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
+    let mut top_room = border_room(rp.borders.and_then(|b| if above { b.between } else { b.top }));
     // A deleted paragraph hidden from view is laid out without its borders: no room for them.
     let border_state = |pl: &ParaLayout, above, top_room| pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
     let excl_mark = pb.excl.len();
@@ -3788,7 +3802,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     pb.y += before;
     let mut applied_before = before;
     // Bordered paragraphs: room for their top and bottom borders, those of a group joined in one box.
-    let below = joined(ctx.doc, &ctx.doc.body, block, Some(block + 1), None);
+    let below = pl.rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block, Some(block + 1), None);
     let own = Edges::own(&pl, 0, pl.lines.len());
     let bottom_room = if below { 0.0 } else { own.bottom };
     // Keep lines together: if it doesn't fit but would on an empty column, move it. Keep with
@@ -4021,14 +4035,14 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             pb.bottom = pb.body_floor().max(placed_bottom).min(pb.orig_bottom);
         }
         let mut items = Vec::new();
-        let mut edges = Edges { top: if l0 == 0 { top_room } else { 0.0 }, bottom: if l1 >= n { bottom_room } else { 0.0 }, up: 0.0 };
+        let mut edges = Edges { top: if l0 == 0 { top_room } else { 0.0 }, bottom: if l1 >= n { bottom_room } else { 0.0 }, up: 0.0, between: above };
         if l0 == 0
             && above
             && let Some((page, col, end)) = pb.para_end
             && page == pb.pages.len()
             && col == pb.col
         {
-            edges.up = (y - end).max(0.0);
+            edges.up = (y - edges.top - end).max(0.0);
         }
         let end = push_para(&mut items, StoryRef::Body, &[block as u32], &pl, l0, l1, x, y, width, edges);
         pb.para_end = Some((pb.pages.len(), pb.col, end));
@@ -4274,9 +4288,11 @@ fn next_first_line(ctx: &mut Ctx, block: usize, width: f32, depth: usize, counte
             let pl = para::layout_para(p, &env);
             // Its border room, unless it joins the paragraph before (or after) in one box.
             let own = Edges::own(&pl, 0, pl.lines.len());
-            let top = if joined(ctx.doc, &ctx.doc.body, block + 1, Some(block), None) { 0.0 } else { own.top };
+            let above = pl.rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block + 1, Some(block), None);
+            let top = if above { border_room(pl.rp.borders.and_then(|b| b.between)) } else { own.top };
             if pl.rp.keep_next && depth < 8 {
-                let bottom = if joined(ctx.doc, &ctx.doc.body, block + 1, Some(block + 2), None) { 0.0 } else { own.bottom };
+                let below = pl.rp.borders.is_some() && joined(ctx.doc, &ctx.doc.body, block + 1, Some(block + 2), None);
+                let bottom = if below { 0.0 } else { own.bottom };
                 pl.rp.space_before + top + pl.height + bottom + pl.rp.space_after + next_first_line(ctx, block + 1, width, depth + 1, counters)
             } else {
                 // The room this one needs to start on the page with the kept paragraph before
