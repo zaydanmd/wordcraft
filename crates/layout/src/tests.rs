@@ -2310,6 +2310,92 @@ fn section_breaks_show_with_formatting_marks() {
     assert_eq!(labels(&Document::from_text("One\nTwo"), true), (vec![], 2));
 }
 
+#[test]
+fn a_bottom_border_leaves_room_before_the_next_paragraph() {
+    let mut d = Document::from_text("Bordered\nFollowing");
+    let plain = lay(&d);
+    let b = Some(Border { space: 7.0, ..Border::single(3.0) });
+    d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().props.borders = Some(Borders { bottom: b, ..Default::default() });
+    let bordered = lay(&d);
+    let top = |l: &DocLayout, block| l.caret(&Pos::body(block, 0)).unwrap().top;
+    assert!((top(&bordered, 0) - top(&plain, 0)).abs() < 0.01);
+    let shift = top(&bordered, 1) - top(&plain, 1);
+    assert!((shift - 10.0).abs() < 0.01, "bottom border moves the next paragraph by {shift} pt");
+}
+
+#[test]
+fn paragraph_borders_make_a_table_row_taller() {
+    let height = |bordered: bool| {
+        let mut d = Document::new();
+        let mut table = Table::new(1, 1, 300.0);
+        let mut p = Paragraph::with_text("Bordered cell", Default::default());
+        if bordered {
+            p.props.borders = Some(Borders {
+                top: Some(Border { space: 7.0, ..Border::single(3.0) }),
+                bottom: Some(Border { space: 5.0, ..Border::single(2.0) }),
+                ..Default::default()
+            });
+        }
+        table.rows[0].cells[0].blocks = vec![Arc::new(Block::Para(p))];
+        d.body = vec![Arc::new(Block::Table(table))];
+        let l = lay(&d);
+        l.pages[0].items.iter().find_map(|i| if let Placed::Cell { rect, .. } = i { Some(rect.h) } else { None }).unwrap()
+    };
+    let extra = height(true) - height(false);
+    assert!((extra - 17.0).abs() < 0.01, "paragraph borders add {extra} pt to the row");
+}
+
+#[test]
+fn a_split_paragraph_has_border_room_only_at_its_ends() {
+    use wordcraft_doc::props::LineSpacing;
+    let mut d = Document::from_text("Following");
+    d.body.insert(0, Arc::new(Block::Para(Paragraph::with_text("First\nSecond\nThird\nFourth", Default::default()))));
+    d.last_section.page_h = 240.0;
+    let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+    p.props = ParaProps {
+        space_before: Some(0.0),
+        space_after: Some(0.0),
+        line_spacing: Some(LineSpacing::Exactly(24.0)),
+        widow_control: Some(false),
+        borders: Some(Borders {
+            top: Some(Border { space: 7.0, ..Border::single(3.0) }),
+            bottom: Some(Border { space: 5.0, ..Border::single(2.0) }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let l = lay(&d);
+    assert_eq!(l.pages.len(), 2);
+    let mut end = 0;
+    for (page, pg) in l.pages.iter().enumerate() {
+        let (para, l0, l1, y) = pg
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Placed::Lines { path, para, l0, l1, y, .. } if path.0 == [0] => Some((para, *l0, *l1, *y)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(l0, end);
+        end = l1;
+        assert!((y - pg.body.y - if page == 0 { 10.0 } else { 0.0 }).abs() < 0.01, "page={page}, y={y}");
+        let rules: Vec<_> =
+            pg.items.iter().filter_map(|i| if let Placed::Rule { y0, y1, .. } = i { (y0 == y1).then_some(*y0) } else { None }).collect();
+        assert_eq!(rules.len(), 1, "page={page}: {rules:?}");
+        let bottom = item_bottom(y, para, l0, l1).unwrap();
+        if page == 0 {
+            assert!((rules[0] - pg.body.y - 1.5).abs() < 0.01);
+            assert!(l1 < para.lines.len());
+        } else {
+            assert_eq!(l1, para.lines.len());
+            assert!((rules[0] - bottom - 6.0).abs() < 0.01);
+            let next = l.caret(&Pos::body(1, 0)).unwrap();
+            assert_eq!(next.page, 1);
+            assert!((next.top - bottom - 7.0).abs() < 0.01);
+        }
+    }
+}
+
 /// A paragraph kept together counts its border room: one that fits on the page only without it
 /// moves to the next page whole rather than splitting.
 #[test]
@@ -6752,6 +6838,21 @@ fn wrapped_shape_doc(kind: wordcraft_doc::para::ShapeKind, w: f32, h: f32, float
 }
 
 #[test]
+fn a_top_bordered_paragraph_wraps_at_its_drawn_height() {
+    use wordcraft_doc::para::{Float, ShapeKind, Wrap};
+    let mut d = wrapped_shape_doc(ShapeKind::Rectangle, 160.0, 36.0, Float { wrap: Wrap::Square, y: 36.0, ..Default::default() });
+    let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+    p.props.borders = Some(Borders { top: Some(Border { space: 20.0, ..Border::single(4.0) }), ..Default::default() });
+    p.props.line_spacing = Some(wordcraft_doc::props::LineSpacing::Exactly(12.0));
+    let l = lay(&d);
+    let pg = &l.pages[0];
+    let r = pg.items.iter().find_map(|i| if let Placed::Shape { rect, .. } = i { Some(*rect) } else { None }).unwrap();
+    let lines = line_boxes(&l, 0, 0, pg.body.x);
+    assert_clear_of(&lines, r, "bordered paragraph");
+    assert!(lines.iter().filter(|line| line.1 >= r.bottom()).all(|line| (line.0 - pg.body.x).abs() < 0.01), "{lines:?}");
+}
+
+#[test]
 fn tight_wrap_follows_an_ellipse() {
     use wordcraft_doc::para::{Float, ShapeKind, Wrap};
     let spans = |wrap| {
@@ -9435,6 +9536,21 @@ fn a_paragraph_left_out_whole_takes_no_room() {
     assert!(three_top(&d, &moves, 2) > without + 1.0);
     let plain = LayoutOptions { hide_marked: HideDeleted { plain: true, moved_from: false }, ..Default::default() };
     assert!((three_top(&d, &plain, 2) - without).abs() < 0.01);
+}
+
+#[test]
+fn a_hidden_deleted_paragraphs_border_takes_no_room() {
+    let mut d = Document::from_text("One\nGone\nThree");
+    d.para_mut(StoryRef::Body, &Path::top(1)).unwrap().props.borders =
+        Some(Borders { top: Some(Border { space: 31.0, ..Border::single(12.0) }), ..Default::default() });
+    d.format_range(&Pos::body(1, 0), &Pos::body(2, 0), &|c| c.del = Some(0)).unwrap();
+    let opts = LayoutOptions { hide_deleted: true, ..Default::default() };
+    let l = layout(&d, &mut LayoutCache::new(), &opts);
+    let without = layout(&Document::from_text("One\nThree"), &mut LayoutCache::new(), &opts);
+    let next = l.caret(&Pos::body(2, 0)).unwrap();
+    let expected = without.caret(&Pos::body(1, 0)).unwrap();
+    assert_eq!(next.page, expected.page);
+    assert!((next.top - expected.top).abs() < 0.01, "next paragraph at {}, expected {}", next.top, expected.top);
 }
 
 /// Gap #5 review: a paragraph left out whole draws no shading and no borders (they would be

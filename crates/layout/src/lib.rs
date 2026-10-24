@@ -1296,10 +1296,6 @@ fn layout_box(
                     excl.extend(wrap_area(r, float, outline.as_deref().map(|v| v.as_slice())));
                     floats.insert(oi, r);
                 }
-                let rel = rel_exclusions(&excl, 0.0, y);
-                if !rel.is_empty() {
-                    pl = ctx.para_labelled(p, width, table, &rel, label);
-                }
                 // Bordered paragraphs: room for their borders, those of a group joined in one box.
                 let cell = table.map(|t| &t.para);
                 let (above, below) = (joined(ctx.doc, blocks, i, i.checked_sub(1), cell), joined(ctx.doc, blocks, i, Some(i + 1), cell));
@@ -1309,6 +1305,10 @@ fn layout_box(
                 }
                 if below {
                     edges.bottom = 0.0;
+                }
+                let rel = rel_exclusions(&excl, 0.0, y + edges.top);
+                if !rel.is_empty() {
+                    pl = ctx.para_labelled(p, width, table, &rel, label);
                 }
                 let lead = pl.lines.first().map_or(0.0, |l| l.top.max(0.0)) + edges.top;
                 if above {
@@ -3307,9 +3307,10 @@ fn group_members(o: &InlineObject, rect: Rect) -> Vec<(Rect, &InlineObject)> {
         .collect()
 }
 
-/// Position the floating objects anchored in `p` for a paragraph whose text starts at `y0` in
+/// Position the floating objects anchored in `p` for a paragraph starting at `y0` in
 /// the current column, add their wrap areas to the page (replacing any from an earlier attempt,
-/// from `excl_mark` on) and lay the paragraph out around them, with its list `label`. `p` is
+/// from `excl_mark` on) and lay the paragraph out around them, with its list `label`; its text
+/// starts `top_room` lower, below its top border's room, and wraps there. `p` is
 /// body block `block`. A float the page started with ([`EarlyFloats`]) keeps its place among the
 /// page's wrap areas (its area as placed now). Without `place` (a later piece of the paragraph
 /// broken again for another column) the floats stay where its first piece placed and drew them:
@@ -3323,6 +3324,7 @@ fn anchor_floats(
     block: usize,
     y0: f32,
     before: f32,
+    top_room: f32,
     excl_mark: usize,
     label: &Option<(String, Level)>,
     place: bool,
@@ -3373,7 +3375,7 @@ fn anchor_floats(
             }
         }
     }
-    let rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
+    let rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0 + top_room);
     let pl = ctx.para_labelled(p, width, None, &rel, label.clone());
     (rects, pl, rel)
 }
@@ -3698,7 +3700,12 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // Floating objects anchored here join the page's wrap areas before the text is laid out; if
     // the paragraph then starts somewhere else (another column or page, or contextual spacing
     // drops its space before), they are placed again there.
-    let space_before = ctx.doc.styles.resolve_para(&p.props).space_before;
+    let rp = ctx.doc.styles.resolve_para(&p.props);
+    let space_before = rp.space_before;
+    let mut above = joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
+    let mut top_room = if above { 0.0 } else { border_room(rp.borders.and_then(|b| b.top)) };
+    // A deleted paragraph hidden from view is laid out without its borders: no room for them.
+    let border_state = |pl: &ParaLayout, above, top_room| pl.rp.borders.map_or((false, 0.0), |_| (above, top_room));
     let excl_mark = pb.excl.len();
     let guess = pb.y + space_before;
     let label = ctx.next_label(p);
@@ -3708,7 +3715,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let mut page_map: Vec<(usize, u32)> = Vec::new();
     // Where its automatic equation numbers start: each layout of it again counts from here.
     let eq_start = ctx.eq_count;
-    let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, &label, true);
+    let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, top_room, excl_mark, &label, true);
+    (above, top_room) = border_state(&pl, above, top_room);
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
     // page (bounded: a paragraph over hundreds of pages keeps the last number it got).
     let (mut laid_page, mut laid_width) = (pb.number, pb.col_w());
@@ -3780,10 +3788,9 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     pb.y += before;
     let mut applied_before = before;
     // Bordered paragraphs: room for their top and bottom borders, those of a group joined in one box.
-    let above = joined(ctx.doc, &ctx.doc.body, block, block.checked_sub(1), None);
     let below = joined(ctx.doc, &ctx.doc.body, block, Some(block + 1), None);
     let own = Edges::own(&pl, 0, pl.lines.len());
-    let (top_room, bottom_room) = (if above { 0.0 } else { own.top }, if below { 0.0 } else { own.bottom });
+    let bottom_room = if below { 0.0 } else { own.bottom };
     // Keep lines together: if it doesn't fit but would on an empty column, move it. Keep with
     // next alone moves a paragraph only when it would fit here by itself (Word for Windows): one
     // that doesn't breaks as usual, its last lines going over with the next paragraph.
@@ -3801,7 +3808,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // A different top only matters when there is something to wrap around.
     if spot(pb) != placed_at || ((pb.y - guess).abs() > 0.01 && !pb.excl.is_empty()) {
         let y0 = pb.y;
-        (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, &label, true));
+        (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, top_room, excl_mark, &label, true));
+        (above, top_room) = border_state(&pl, above, top_room);
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
     }
@@ -3832,6 +3840,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     && relaid.lines.get(k).is_some_and(|l| (l.top - t).abs() < 0.01)
                 {
                     (pl, rel) = (relaid, here);
+                    (above, top_room) = border_state(&pl, above, top_room);
                     n = pl.lines.len();
                     l0 = k;
                 }
@@ -3857,6 +3866,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             match relaid.lines.iter().position(|l| l.start == resume) {
                 Some(k) => {
                     pl = relaid;
+                    (above, top_room) = border_state(&pl, above, top_room);
                     n = pl.lines.len();
                     l0 = k;
                 }
@@ -3976,7 +3986,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 pb.advance(block, body_top);
                 if l0 == 0 {
                     let y0 = pb.y;
-                    (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, true));
+                    (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, top_room, excl_mark, &label, true));
+                    (above, top_room) = border_state(&pl, above, top_room);
                     (laid_page, laid_width) = (pb.number, pb.col_w());
                     anchor_y = y0;
                     n = pl.lines.len();
@@ -4100,10 +4111,11 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     let y0 = pb.y;
                     // The floats were placed and drawn with the first piece: they stay there.
                     let (rects, relaid, relaid_rel) = with_page_map(ctx, &mut page_map, |ctx| {
-                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, false))
+                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, 0.0, excl_mark, &label, false))
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
                         (float_rects, pl, rel) = (rects, relaid, relaid_rel);
+                        (above, top_room) = border_state(&pl, above, top_room);
                         (laid_page, laid_width) = (pb.number, pb.col_w());
                         anchor_y = y0;
                         n = pl.lines.len();
