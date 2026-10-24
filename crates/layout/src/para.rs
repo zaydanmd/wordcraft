@@ -1094,6 +1094,7 @@ impl<'a> Builder<'a> {
                 // caret, selection and line breaking never stop inside the character.
                 bounds.retain(|b| map_starts.binary_search(b).is_ok());
             }
+            let decimal = wordcraft_doc::locale_number::decimal_separator(rc.lang.as_deref());
             let seg_c0 = self.clusters.len();
             let mut gi = 0usize;
             for (bi, &gs) in bounds.iter().enumerate() {
@@ -1132,7 +1133,7 @@ impl<'a> Builder<'a> {
                     break_after: false,
                     obj_h: 0.0,
                     obj_d: 0.0,
-                    dot: s == "." || s == ",",
+                    dot: ch == decimal,
                 });
             }
             if matches!(dir, Dir::Para) {
@@ -2253,11 +2254,13 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                 end = LineEnd::Wrap;
                 break;
             }
-            // Text after a right/centre tab grows leftwards into the tab's space first.
+            // Text after a right/centre tab grows leftwards into the tab's space first (after a
+            // decimal tab, only until the separator).
             let absorbs = pending_tab.is_some_and(|(tj, stop, _)| {
                 let room = pl.clusters.get(tj).map(|t| t.adv).unwrap_or(0.0);
                 match stop.align {
-                    TabAlign::Right | TabAlign::Decimal => room >= c.adv,
+                    TabAlign::Right => room >= c.adv,
+                    TabAlign::Decimal => room >= c.adv && !pl.clusters.get(tj + 1..=j).unwrap_or_default().iter().any(|c| c.dot),
                     TabAlign::Center => room >= c.adv / 2.0 && x + c.adv / 2.0 <= right_edge + 0.01,
                     _ => false,
                 }
@@ -2335,24 +2338,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                 let shift = match stop.align {
                     TabAlign::Right => stop.pos - tx - seg_w,
                     TabAlign::Center => stop.pos - tx - seg_w / 2.0,
-                    TabAlign::Decimal => {
-                        // Width up to the first '.' in the segment.
-                        let mut w = 0.0;
-                        let mut found = false;
-                        for k in tj + 1..=j {
-                            let Some(cc) = pl.clusters.get(k) else { break };
-                            let s = pl_text_at(cc);
-                            if found {
-                                break;
-                            }
-                            if s {
-                                found = true;
-                                break;
-                            }
-                            w += cc.adv;
-                        }
-                        stop.pos - tx - if found { w } else { seg_w }
-                    }
+                    TabAlign::Decimal => stop.pos - tx - decimal_lead(pl.clusters.get(tj + 1..=j).unwrap_or_default()),
                     _ => 0.0,
                 };
                 let shift = shift.max(0.0);
@@ -2973,8 +2959,8 @@ fn hyphenation_points(text: &str, to_para: impl Fn(usize) -> Option<usize>, pl: 
     out
 }
 
-fn pl_text_at(c: &Cluster) -> bool {
-    c.dot
+fn decimal_lead(clusters: &[Cluster]) -> f32 {
+    clusters.iter().take_while(|c| !c.dot).map(|c| c.adv).sum()
 }
 
 fn resolve_tab(pl: &mut ParaLayout, pending: &mut Option<(usize, TabStop, f32)>, xs: &mut [f32], c0: usize, x: f32, xo: &mut f32) {
@@ -2982,7 +2968,8 @@ fn resolve_tab(pl: &mut ParaLayout, pending: &mut Option<(usize, TabStop, f32)>,
     let Some((tj, stop, tx)) = pending.take() else { return };
     let seg = x - tx - pl.clusters.get(tj).map(|c| c.adv).unwrap_or(0.0);
     let want = match stop.align {
-        TabAlign::Right | TabAlign::Decimal => stop.pos - tx - seg,
+        TabAlign::Right => stop.pos - tx - seg,
+        TabAlign::Decimal => stop.pos - tx - decimal_lead(pl.clusters.get(tj + 1..c0 + xs.len()).unwrap_or_default()),
         TabAlign::Center => stop.pos - tx - seg / 2.0,
         _ => return,
     }
