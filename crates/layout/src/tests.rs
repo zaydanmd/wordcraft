@@ -1643,6 +1643,17 @@ fn symbol_font_bullet_without_the_font_draws_a_bullet() {
     // The label reads as the Unicode bullet (drawn from a real Symbol font where one is installed).
     assert_eq!(label.text, "\u{2022}");
     assert_eq!(label.glyphs.len(), 1);
+    if wordcraft_fonts::word::resolve("Symbol", false, false).substituted {
+        let expected = wordcraft_fonts::word::symbol_fallback("Symbol", '\u{2022}', false, false).unwrap();
+        let actual = display::page_display(&d, &l.pages[0], &display::DisplayOptions::default())
+            .into_iter()
+            .find_map(|item| match item {
+                display::Draw::Glyphs { text, face, .. } if text == "\u{2022}" => Some(face),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(actual.family, expected.family, "the bullet keeps the symbol substitute order");
+    }
 }
 
 /// The label's ascent, the text size, and the first line's height and text ascent of a one-line

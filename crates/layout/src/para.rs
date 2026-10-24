@@ -984,12 +984,16 @@ impl<'a> Builder<'a> {
                 _ => rc_cs.is_some() && rc.uses_complex(dc),
             };
             let prim = if complex { primary_cs.unwrap_or(primary) } else { primary };
+            let symbol_face = sym
+                .filter(|s| !s.installed && !prim.covers(dc))
+                .and_then(|_| wordcraft_fonts::word::symbol_fallback(&rc.font, dc, rc.bold, rc.italic));
             let face = match cur {
                 Some(k) if mark => k.face,
                 _ if !complex && east_asian(c) && primary_ea.is_some_and(|f| f.covers(c)) => primary_ea,
                 // The run's one substitute face for a missing Thai font (#1549).
                 _ if !c.is_control() && c != SOFT_HYPHEN && run_face.is_some_and(|f| f.covers(dc)) => run_face,
                 _ if prim.covers(dc) || c.is_whitespace() || c.is_control() || c == SOFT_HYPHEN => None,
+                _ if symbol_face.is_some() => symbol_face,
                 // Stay in the fallback face the word started in while it covers the letters.
                 Some(SegKey { face: Some(f), .. }) if f.covers(dc) => Some(f),
                 // The run's unified East Asian face, when one face covers the whole run.
